@@ -7,45 +7,46 @@ from scruffy.plugin import Plugin
 
 log = logging.getLogger('api')
 
-class APICommandRequest(APIRequest):
+class APIDerefRequest(APIRequest):
     """
-    API execute command request.
+    API dereference pointer request.
 
     {
         "type":         "request",
-        "request":      "command"
+        "request":      "dereference"
         "data": {
-            "command":  "break list"
+            "pointer":  0xffffff8012341234
         }
     }
     """
-    _fields = {'command': True}
+    _fields = {'pointer': True}
 
     @server_side
     def dispatch(self):
         try:
-            output = voltron.debugger.command(self.command)
-            res = APICommandResponse()
+            output = voltron.debugger.dereference(self.pointer)
+            log.debug('output: {}'.format(str(output)))
+            res = APIDerefResponse()
             res.output = output
         except NoSuchTargetException:
             res = APINoSuchTargetErrorResponse()
         except Exception as e:
-            msg = "Exception executing debugger command: {}".format(repr(e))
+            msg = "Exception dereferencing pointer: {}".format(repr(e))
             log.exception(msg)
             res = APIGenericErrorResponse(msg)
 
         return res
 
 
-class APICommandResponse(APISuccessResponse):
+class APIDerefResponse(APISuccessResponse):
     """
-    API list targets response.
+    API dereference pointer response.
 
     {
         "type":         "response",
         "status":       "success",
         "data": {
-            "output":   "stuff"
+            "output":   [0xffffff8055555555, "main + 0x123"]
         }
     }
     """
@@ -54,7 +55,7 @@ class APICommandResponse(APISuccessResponse):
     output = None
 
 
-class APICommandPlugin(APIPlugin):
-    request = "command"
-    request_class = APICommandRequest
-    response_class = APICommandResponse
+class APIDerefPlugin(APIPlugin):
+    request = "dereference"
+    request_class = APIDerefRequest
+    response_class = APIDerefResponse

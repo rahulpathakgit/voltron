@@ -25,10 +25,13 @@ class PluginManager(object):
         self._debugger_plugins = defaultdict(lambda: None)
         self._view_plugins = defaultdict(lambda: None)
         self._web_plugins = defaultdict(lambda: None)
+        self._command_plugins = defaultdict(lambda: None)
 
         log.debug("Initalising PluginManager {}".format(self))
 
-        # register all plugins in the environment
+        self.register_plugins()
+
+    def register_plugins(self):
         for p in voltron.env.plugins:
             self.register_plugin(p)
 
@@ -48,6 +51,10 @@ class PluginManager(object):
     def web_plugins(self):
         return self._web_plugins
 
+    @property
+    def command_plugins(self):
+        return self._command_plugins
+
     def register_plugin(self, plugin):
         """
         Register a new plugin with the PluginManager.
@@ -57,23 +64,25 @@ class PluginManager(object):
         This is called by __init__(), but may also be called by the debugger
         host to load a specific plugin at runtime.
         """
+        if hasattr(plugin, 'initialise'):
+            plugin.initialise()
         if self.valid_api_plugin(plugin):
             log.debug("Registering API plugin: {}".format(plugin))
-            p = plugin()
-            p.request_class._plugin = plugin
-            p.request_class.request = plugin.request
-            self._api_plugins[plugin.request] = p
+            self._api_plugins[plugin.request] = plugin()
         elif self.valid_debugger_plugin(plugin):
             log.debug("Registering debugger plugin: {}".format(plugin))
-            p = plugin()
-            p.adaptor_class._plugin = plugin
-            self._debugger_plugins[plugin.host] = p
+            self._debugger_plugins[plugin.host] = plugin()
         elif self.valid_view_plugin(plugin):
             log.debug("Registering view plugin: {}".format(plugin))
             self._view_plugins[plugin.name] = plugin()
         elif self.valid_web_plugin(plugin):
             log.debug("Registering web plugin: {}".format(plugin))
             self._web_plugins[plugin.name] = plugin()
+        elif self.valid_command_plugin(plugin):
+            log.debug("Registering command plugin: {}".format(plugin))
+            self._command_plugins[plugin.name] = plugin()
+            if voltron.debugger:
+                voltron.debugger.register_command_plugin(plugin.name, plugin.command_class)
         else:
             log.debug("Ignoring invalid plugin: {}".format(plugin))
 
@@ -132,6 +141,19 @@ class PluginManager(object):
             return True
         return False
 
+    def valid_command_plugin(self, plugin):
+        """
+        Validate a command plugin, ensuring it is a command plugin and has the
+        necessary fields present.
+
+        `plugin` is a subclass of scruffy's Plugin class.
+        """
+        if (issubclass(plugin, CommandPlugin)   and
+            hasattr(plugin, 'plugin_type')      and plugin.plugin_type == 'command' and
+            hasattr(plugin, 'name')             and plugin.name != None):
+            return True
+        return False
+
     def api_plugin_for_request(self, request=None):
         """
         Find an API plugin that supports the given request type.
@@ -148,16 +170,28 @@ class PluginManager(object):
         """
         Find a view plugin that for the given view name.
         """
-        return self.view_plugins[host]
+        return self.view_plugins[name]
 
     def web_plugin_with_name(self, name=None):
         """
         Find a web plugin that for the given view name.
         """
-        return self.web_plugins[host]
+        return self.web_plugins[name]
+
+    def command_plugin_with_name(self, name=None):
+        """
+        Find a command plugin that for the given view name.
+        """
+        return self.command_plugins[name]
 
 
-class APIPlugin(Plugin):
+class VoltronPlugin(Plugin):
+    @classmethod
+    def initialise(cls):
+        pass
+
+
+class APIPlugin(VoltronPlugin):
     """
     Abstract API plugin class. API plugins subclass this.
 
@@ -183,7 +217,14 @@ class APIPlugin(Plugin):
     response_class = None
     supported_hosts = ['core']
 
-class DebuggerAdaptorPlugin(Plugin):
+    @classmethod
+    def initialise(cls):
+        if cls.request_class:
+            cls.request_class._plugin = cls
+            cls.request_class.request = cls.request
+
+
+class DebuggerAdaptorPlugin(VoltronPlugin):
     """
     Debugger adaptor plugin parent class.
 
@@ -197,7 +238,13 @@ class DebuggerAdaptorPlugin(Plugin):
     adaptor_class = None
     supported_hosts = ['core']
 
-class ViewPlugin(Plugin):
+    @classmethod
+    def initialise(cls):
+        if cls.adaptor_class:
+            cls.adaptor_class._plugin = cls
+
+
+class ViewPlugin(VoltronPlugin):
     """
     View plugin parent class.
 
@@ -211,7 +258,14 @@ class ViewPlugin(Plugin):
     name = None
     view_class = None
 
-class WebPlugin(Plugin):
+    @classmethod
+    def initialise(cls):
+        if cls.view_class:
+            cls.view_class._plugin = cls
+            cls.view_class.view_type = cls.name
+
+
+class WebPlugin(VoltronPlugin):
     """
     Web plugin parent class.
 
@@ -227,6 +281,18 @@ class WebPlugin(Plugin):
 
     def __init__(self):
         self._dir = os.path.dirname(inspect.getfile(self.__class__))
+
+
+class CommandPlugin(VoltronPlugin):
+    """
+    Command plugin parent class.
+
+    `plugin_type` is 'command'
+    `name` is the name of the command plugin
+    """
+    plugin_type = 'command'
+    name = None
+
 
 #
 # Shared plugin manager and convenience methods
@@ -272,6 +338,14 @@ def view(name, *args, **kwargs):
     else:
         raise Exception("Invalid view name")
     return view
+
+def command(name, *args, **kwargs):
+    plugin = pm.command_plugin_with_name(name)
+    if plugin and plugin.command_class:
+        command = plugin.command_class(*args, **kwargs)
+    else:
+        raise Exception("Invalid command name")
+    return command
 
 def web_plugins():
     return pm.web_plugins

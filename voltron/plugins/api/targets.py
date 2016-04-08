@@ -25,11 +25,10 @@ class APITargetsRequest(APIRequest):
             res.targets = voltron.debugger.targets()
         except NoSuchTargetException:
             res = APINoSuchTargetErrorResponse()
-        except Exception, e:
-            msg = "Exception getting targets from debugger: {}".format(e)
-            log.error(msg)
-            res = APIGenericErrorResponse()
-            res.error_message = msg
+        except Exception as e:
+            msg = "Exception getting targets from debugger: {}".format(repr(e))
+            log.exception(msg)
+            res = APIGenericErrorResponse(msg)
 
         return res
 

@@ -4,10 +4,11 @@ import logging
 import threading
 import re
 import struct
+import six
 
 from voltron.api import *
 from voltron.plugin import *
-from voltron.debugger import *
+from voltron.dbg import *
 
 try:
     import gdb
@@ -24,12 +25,14 @@ if HAVE_GDB:
             'i386': 'x86', 'i386:intel': 'x86', 'i386:x64-32': 'x86', 'i386:x64-32:intel': 'x86', 'i8086': 'x86',
             'i386:x86-64': 'x86_64', 'i386:x86-64:intel': 'x86_64',
             'arm': 'arm', 'armv2': 'arm', 'armv2a': 'arm', 'armv3': 'arm', 'armv3m': 'arm', 'armv4': 'arm',
-            'armv4t': 'arm', 'armv5': 'arm', 'armv5t': 'arm', 'armv5te': 'arm'
+            'armv4t': 'arm', 'armv5': 'arm', 'armv5t': 'arm', 'armv5te': 'arm',
+            'powerpc:common': 'powerpc'
         }
         sizes = {
             'x86': 4,
             'x86_64': 8,
-            'arm': 4
+            'arm': 4,
+            'powerpc': 4,
         }
 
         """
@@ -78,9 +81,9 @@ if HAVE_GDB:
             d["state"] = self._state()
 
             # get inferior file (doesn't seem to be available through the API)
-            lines = filter(lambda x: x != '', gdb.execute('info inferiors', to_string=True).split('\n'))
+            lines = list(filter(lambda x: x != '', gdb.execute('info inferiors', to_string=True).split('\n')))
             if len(lines) > 1:
-                info = filter(lambda x: '*' in x[0], map(lambda x: x.split(), lines[1:]))
+                info = list(filter(lambda x: '*' in x[0], map(lambda x: x.split(), lines[1:])))
                 d["file"] = info[0][-1]
             else:
                 log.debug("No inferiors in `info inferiors`")
@@ -157,6 +160,8 @@ if HAVE_GDB:
                     regs = self.get_registers_x86()
                 elif arch == "arm":
                     regs = self.get_registers_arm()
+                elif arch == "powerpc":
+                    regs = self.get_registers_powerpc()
                 else:
                     raise UnknownArchitectureException()
 
@@ -206,7 +211,7 @@ if HAVE_GDB:
             """
             # read memory
             log.debug('Reading 0x{:x} bytes of memory at 0x{:x}'.format(length, address))
-            memory = str(gdb.selected_inferior().read_memory(address, length))
+            memory = bytes(gdb.selected_inferior().read_memory(address, length))
             return memory
 
         @validate_busy
@@ -221,7 +226,7 @@ if HAVE_GDB:
             `thread_id` is a thread ID (or None for the selected thread)
             """
             # get the stack pointer
-            sp = self.stack_pointer(target_id=target_id, thread_id=thread_id)
+            sp_name, sp = self.stack_pointer(target_id=target_id, thread_id=thread_id)
 
             # read memory
             memory = self.memory(sp, length, target_id=target_id)
@@ -264,28 +269,30 @@ if HAVE_GDB:
             while True:
                 try:
                     mem = gdb.selected_inferior().read_memory(addr, self.get_addr_size())
-                    log.debug("read mem: {}".format(mem))
+                    # log.debug("read mem: {}".format(mem))
                     (ptr,) = struct.unpack(fmt, mem)
                     if ptr in chain:
                         break
                     chain.append(('pointer', addr))
                     addr = ptr
                 except gdb.MemoryError:
+                    log.exception("Dereferencing pointer 0x{:X}".format(addr))
                     break
 
             # get some info for the last pointer
             # first try to resolve a symbol context for the address
-            p, addr = chain[-1]
-            output = gdb.execute('info symbol {}'.format(addr), to_string=True)
-            if 'No symbol matches' not in output:
-                chain.append(('symbol', output))
-                log.debug("symbol context: {}".format(str(chain[-1])))
-            else:
-                log.debug("no symbol context")
-                mem = gdb.selected_inferior().read_memory(addr, 1)
-                if ord(mem[0]) < 127:
-                    output = gdb.execute('x/s 0x{:X}'.format(addr), to_string=True)
-                    chain.append(('string', '"'.join(output.split('"')[1:-1])))
+            if len(chain):
+                p, addr = chain[-1]
+                output = gdb.execute('info symbol {}'.format(addr), to_string=True)
+                if 'No symbol matches' not in output:
+                    chain.append(('symbol', output.strip()))
+                    log.debug("symbol context: {}".format(str(chain[-1])))
+                else:
+                    log.debug("no symbol context")
+                    mem = gdb.selected_inferior().read_memory(addr, 1)
+                    if ord(mem[0]) < 127:
+                        output = gdb.execute('x/s 0x{:X}'.format(addr), to_string=True)
+                        chain.append(('string', '"'.join(output.split('"')[1:-1]).strip()))
 
             log.debug("chain: {}".format(chain))
             return chain
@@ -314,6 +321,69 @@ if HAVE_GDB:
             flavor = re.search('flavor is "(.*)"', gdb.execute("show disassembly-flavor", to_string=True)).group(1)
             return flavor
 
+        @lock_host
+        def breakpoints(self, target_id=0):
+            """
+            Return a list of breakpoints.
+
+            Returns data in the following structure:
+            [
+                {
+                    "id":           1,
+                    "enabled":      True,
+                    "one_shot":     False,
+                    "hit_count":    5,
+                    "locations": [
+                        {
+                            "address":  0x100000cf0,
+                            "name":     'main'
+                        }
+                    ]
+                }
+            ]
+            """
+            breakpoints = []
+
+            # hahahahaha GDB sucks so much
+            for b in gdb.breakpoints():
+                try:
+                    if b.location.startswith('*'):
+                        addr = int(b.location[1:], 16)
+                    else:
+                        output = gdb.execute('info addr {}'.format(b.location), to_string=True)
+                        m = re.match('.*is at ([^ ]*) .*', output)
+                        if not m:
+                            m = re.match('.*at address ([^ ]*)\..*', output)
+                        if m:
+                            addr = int(m.group(1), 16)
+                        else:
+                            addr = 0
+                except:
+                    addr = 0
+
+                breakpoints.append({
+                    'id':           b.number,
+                    'enabled':      b.enabled,
+                    'one_shot':     b.temporary,
+                    'hit_count':    b.hit_count,
+                    'locations':    [{
+                        "address":  addr,
+                        "name":     b.location
+                    }]
+                })
+
+            return breakpoints
+
+            def capabilities(self):
+                """
+                Return a list of the debugger's capabilities.
+
+                Thus far only the 'async' capability is supported. This indicates
+                that the debugger host can be queried from a background thread,
+                and that views can use non-blocking API requests without queueing
+                requests to be dispatched next time the debugger stops.
+                """
+                return []
 
         #
         # Private functions
@@ -332,7 +402,7 @@ if HAVE_GDB:
                         state = "invalid"
                     elif "stopped" in output:
                         state = "stopped"
-                except gdb.error, e:
+                except gdb.error as e:
                     if 'Selected thread is running.' == str(e):
                         state = "running"
             else:
@@ -349,6 +419,8 @@ if HAVE_GDB:
                 reg = self.get_register_x86(reg_name)
             elif arch == "arm":
                 reg = self.get_register_arm(reg_name)
+            elif arch == "powerpc":
+                reg = self.get_register_powerpc(reg_name)
             else:
                 raise UnknownArchitectureException()
 
@@ -361,7 +433,7 @@ if HAVE_GDB:
             vals = {}
             for reg in regs:
                 try:
-                    vals[reg] = int(gdb.parse_and_eval('(long long)$'+reg)) & 0xFFFFFFFFFFFFFFFF
+                    vals[reg] = self.get_register_x86_64(reg)
                 except:
                     log.debug('Failed getting reg: ' + reg)
                     vals[reg] = 'N/A'
@@ -374,12 +446,18 @@ if HAVE_GDB:
                 vals['rflags'] = 'N/A'
 
             # Get SSE registers
-            sse = self.get_registers_sse(16)
-            vals = dict(list(vals.items()) + list(sse.items()))
+            try:
+                sse = self.get_registers_sse(16)
+                vals = dict(list(vals.items()) + list(sse.items()))
+            except gdb.error:
+                log.exception("Failed to get SSE registers")
 
             # Get FPU registers
-            fpu = self.get_registers_fpu()
-            vals = dict(list(vals.items()) + list(fpu.items()))
+            try:
+                fpu = self.get_registers_fpu()
+                vals = dict(list(vals.items()) + list(fpu.items()))
+            except gdb.error:
+                log.exception("Failed to get FPU registers")
 
             return vals
 
@@ -392,7 +470,7 @@ if HAVE_GDB:
             vals = {}
             for reg in regs:
                 try:
-                    vals[reg] = int(gdb.parse_and_eval('(long)$'+reg)) & 0xFFFFFFFF
+                    vals[reg] = self.get_register_x86(reg)
                 except:
                     log.debug('Failed getting reg: ' + reg)
                     vals[reg] = 'N/A'
@@ -405,12 +483,18 @@ if HAVE_GDB:
                 vals['eflags'] = 'N/A'
 
             # Get SSE registers
-            sse = self.get_registers_sse(8)
-            vals = dict(list(vals.items()) + list(sse.items()))
+            try:
+                sse = self.get_registers_sse(8)
+                vals = dict(list(vals.items()) + list(sse.items()))
+            except gdb.error:
+                log.exception("Failed to get SSE registers")
 
             # Get FPU registers
-            fpu = self.get_registers_fpu()
-            vals = dict(list(vals.items()) + list(fpu.items()))
+            try:
+                fpu = self.get_registers_fpu()
+                vals = dict(list(vals.items()) + list(fpu.items()))
+            except gdb.error:
+                log.exception("Failed to get SSE registers")
 
             return vals
 
@@ -422,7 +506,7 @@ if HAVE_GDB:
             # the old way of doing this randomly crashed gdb or threw a python exception
             regs = {}
             for line in gdb.execute('info all-registers', to_string=True).split('\n'):
-                m = re.match('^(xmm\d+)\s.*uint128 = (0x[0-9a-f]+)\}', line)
+                m = re.match('^([xyz]mm\d+)\s.*uint128 = (0x[0-9a-f]+)\}', line)
                 if m:
                     regs[m.group(1)] = int(m.group(2), 16)
             return regs
@@ -444,13 +528,34 @@ if HAVE_GDB:
             vals = {}
             for reg in regs:
                 try:
-                    vals[reg] = int(gdb.parse_and_eval('(long)$'+reg)) & 0xFFFFFFFF
+                    vals[reg] = self.get_register_arm(reg)
                 except:
                     log.debug('Failed getting reg: ' + reg)
                     vals[reg] = 'N/A'
             return vals
 
         def get_register_arm(self, reg):
+            log.debug('Getting register: ' + reg)
+            return int(gdb.parse_and_eval('(long)$'+reg)) & 0xFFFFFFFF
+
+        def get_registers_powerpc(self):
+            log.debug('Getting registers')
+            # TODO This could ideally pull from a single definition for the arch
+            regs = ['pc','msr','cr','lr', 'ctr',
+                    'r0','r1','r2','r3','r4','r5','r6', 'r7',
+                    'r8','r9','r10','r11','r12','r13','r14', 'r15',
+                    'r16','r17','r18','r19','r20','r21','r22', 'r23',
+                    'r24','r25','r26','r27','r28','r29','r30', 'r31']
+            vals = {}
+            for reg in regs:
+                try:
+                    vals[reg] = self.get_register_powerpc(reg)
+                except:
+                    log.debug('Failed getting reg: ' + reg)
+                    vals[reg] = 'N/A'
+            return vals
+
+        def get_register_powerpc(self, reg):
             log.debug('Getting register: ' + reg)
             return int(gdb.parse_and_eval('(long)$'+reg)) & 0xFFFFFFFF
 
@@ -473,6 +578,53 @@ if HAVE_GDB:
             return 'little' if 'little' in gdb.execute('show endian', to_string=True) else 'big'
 
 
+    class GDBCommand(DebuggerCommand, gdb.Command):
+        """
+        Debugger command class for GDB
+        """
+        def __init__(self):
+            super(GDBCommand, self).__init__("voltron", gdb.COMMAND_NONE, gdb.COMPLETE_NONE)
+
+            self.adaptor = voltron.debugger
+
+            self.registered = False
+
+        def invoke(self, arg, from_tty):
+            self.handle_command(arg)
+
+        def register_hooks(self):
+            if not self.registered:
+                gdb.events.stop.connect(self.stop_handler)
+                gdb.events.exited.connect(self.stop_and_exit_handler)
+                gdb.events.cont.connect(self.cont_handler)
+
+        def unregister_hooks(self):
+            if self.registered:
+                gdb.events.stop.disconnect(self.stop_handler)
+                gdb.events.exited.disconnect(self.stop_and_exit_handler)
+                gdb.events.cont.disconnect(self.cont_handler)
+
+        def stop_handler(self, event):
+            self.adaptor.update_state()
+            voltron.server.dispatch_queue()
+            log.debug('Inferior stopped')
+
+        def exit_handler(self, event):
+            log.debug('Inferior exited')
+            voltron.server.stop()
+
+        def stop_and_exit_handler(self, event):
+            log.debug('Inferior stopped and exited')
+            self.stop_handler(event)
+            self.exit_handler(event)
+
+        def cont_handler(self, event):
+            log.debug('Inferior continued')
+            if not voltron.server.is_running:
+                voltron.server.start()
+
+
     class GDBAdaptorPlugin(DebuggerAdaptorPlugin):
         host = 'gdb'
         adaptor_class = GDBAdaptor
+        command_class = GDBCommand

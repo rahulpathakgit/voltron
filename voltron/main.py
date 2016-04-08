@@ -8,38 +8,36 @@ import logging.config
 import voltron
 from .view import *
 from .core import *
-try:
-    from .console import *
-    HAS_CONSOLE = True
-except ImportError:
-    HAS_CONSOLE = False
 
 log = logging.getLogger('main')
 
+
 def main(debugger=None):
-    # Load config
-    voltron.setup_env()
     voltron.setup_logging('main')
 
     # Set up command line arg parser
     parser = argparse.ArgumentParser()
+    parser.register('action', 'parsers', AliasedSubParsersAction)
     parser.add_argument('--debug', '-d', action='store_true', help='print debug logging')
-    top_level_sp = parser.add_subparsers(title='subcommands', description='valid subcommands')
-    view_parser = top_level_sp.add_parser('view', help='display a view')
-    view_sp = view_parser.add_subparsers(title='views', description='valid view types', help='additional help')
+    parser.add_argument('-o', action='append', help='override config variable', default=[])
+    top_level_sp = parser.add_subparsers(title='subcommands', description='valid subcommands', dest='subcommand')
+    top_level_sp.required = True
+    view_parser = top_level_sp.add_parser('view', help='display a view', aliases=('v'))
+    view_parser.register('action', 'parsers', AliasedSubParsersAction)
+    view_sp = view_parser.add_subparsers(title='views', description='valid view types', help='additional help', dest='view')
+    view_sp.required = True
 
     # Set up a subcommand for each view class
     pm = PluginManager()
     for plugin in pm.view_plugins:
         pm.view_plugins[plugin].view_class.configure_subparser(view_sp)
 
-    if HAS_CONSOLE:
-        Console.configure_subparser(top_level_sp)
-
     # Parse args
     args = parser.parse_args()
     if args.debug:
-        log.setLevel(logging.DEBUG)
+        voltron.config['general']['debug_logging'] = True
+        voltron.setup_logging('main')
+    voltron.config.update(options=dict((tuple(x.split('=')) for x in args.o)))
 
     # Instantiate and run the appropriate module
     inst = args.func(args, loaded_config=voltron.config)
@@ -47,13 +45,8 @@ def main(debugger=None):
     try:
         inst.run()
     except Exception as e:
-        log.error("Exception running module {}: {}".format(inst.__class__.__name__, traceback.format_exc()))
+        log.exception("Exception running module {}: {}".format(inst.__class__.__name__, traceback.format_exc()))
         print("Encountered an exception while running the view '{}':\n{}".format(inst.__class__.__name__, traceback.format_exc()))
     except KeyboardInterrupt:
         suppress_exit_log = True
     inst.cleanup()
-
-if __name__ == "__main__":
-    main()
-
-

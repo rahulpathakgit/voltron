@@ -24,8 +24,6 @@ class APIStackRequest(APIRequest):
     selected target and thread will be used.
 
     `length` is the number of bytes to read.
-
-    This request will return immediately.
     """
     _fields = {'target_id': False, 'thread_id': False, 'length': True}
 
@@ -45,9 +43,9 @@ class APIStackRequest(APIRequest):
             res = APINoSuchTargetErrorResponse()
         except TargetBusyException:
             res = APITargetBusyErrorResponse()
-        except Exception, e:
+        except Exception as e:
             msg = "Unhandled exception {} reading stack: {}".format(type(e), e)
-            log.error(msg)
+            log.exception(msg)
             res = APIErrorResponse(code=0, message=msg)
 
         return res

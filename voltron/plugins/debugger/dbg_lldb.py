@@ -3,10 +3,12 @@ from __future__ import print_function
 import struct
 import logging
 import threading
+import codecs
+from collections import namedtuple
 
 from voltron.api import *
 from voltron.plugin import *
-from voltron.debugger import *
+from voltron.dbg import *
 
 try:
     import lldb
@@ -16,8 +18,9 @@ except ImportError:
 
 log = logging.getLogger('debugger')
 
-if HAVE_LLDB:
+MAX_DEREF = 16
 
+if HAVE_LLDB:
     class LLDBAdaptor(DebuggerAdaptor):
         """
         The interface with an instance of LLDB
@@ -47,6 +50,19 @@ if HAVE_LLDB:
         @host.setter
         def host(self, value):
             self._host = value
+
+        def normalize_triple(self, triple):
+            """
+            Returns a (cpu, platform, abi) triple
+
+            Returns None for any fields that can't be elided
+            """
+
+            s = triple.split("-")
+            arch, platform, abi = s[0], s[1], '-'.join(s[2:])
+            if arch == "x86_64h":
+                arch = "x86_64"
+            return (arch, platform, abi)
 
         def version(self):
             """
@@ -78,9 +94,11 @@ if HAVE_LLDB:
             d["state"] = self.host.StateAsCString(t.process.GetState())
             d["file"] = t.GetExecutable().fullpath
             try:
-                d["arch"] = t.triple.split('-')[0]
+                d["arch"], _, _ = self.normalize_triple(t.triple)
             except:
                 d["arch"] = None
+            if d["arch"] == 'i386':
+                d["arch"] = 'x86'
             d["byte_order"] = 'little' if t.byte_order == lldb.eByteOrderLittle else 'big'
             d["addr_size"] = t.addr_size
 
@@ -169,7 +187,7 @@ if HAVE_LLDB:
                     registers.remove('sp')
                     registers.append(self.reg_names[t_info['arch']]['sp'])
             else:
-                raise Exception("Unsupported architecture: {}".format(target['arch']))
+                raise Exception("Unsupported architecture: {}".format(t_info['arch']))
 
             # get the registers
             regs = thread.GetFrameAtIndex(0).GetRegisters()
@@ -181,15 +199,21 @@ if HAVE_LLDB:
             regs = {}
             for reg in objs:
                 val = 'n/a'
-                if reg.value != None:
+                if reg.value is not None:
                     try:
-                        val = int(reg.value, 16)
+                        val = reg.GetValueAsUnsigned()
                     except:
-                        try:
-                            val = int(reg.value)
-                        except Exception as e:
-                            log.error("Exception converting register value: " + str(e))
-                            val = 0
+                        reg = None
+                elif reg.num_children > 0:
+                    try:
+                        children = []
+                        for i in xrange(reg.GetNumChildren()):
+                            children.append(int(reg.GetChildAtIndex(i, lldb.eNoDynamicValues, True).value, 16))
+                        if t_info['byte_order'] == 'big':
+                            children = list(reversed(children))
+                        val = int(codecs.encode(struct.pack('{}B'.format(len(children)), *children), 'hex'), 16)
+                    except:
+                        pass
                 if registers == [] or reg.name in registers:
                     regs[reg.name] = val
 
@@ -320,8 +344,7 @@ if HAVE_LLDB:
             chain = []
 
             # recursively dereference
-            # import pdb;pdb.set_trace()
-            while True:
+            for i in range(0, MAX_DEREF):
                 ptr = t.process.ReadPointerFromMemory(addr, error)
                 if error.Success():
                     if ptr in chain:
@@ -331,6 +354,9 @@ if HAVE_LLDB:
                     addr = ptr
                 else:
                     break
+
+            if len(chain) == 0:
+                raise InvalidPointerError("0x{:X} is not a valid pointer".format(pointer))
 
             # get some info for the last pointer
             # first try to resolve a symbol context for the address
@@ -395,7 +421,129 @@ if HAVE_LLDB:
 
             return flavor
 
+        @validate_busy
+        @validate_target
+        @lock_host
+        def breakpoints(self, target_id=0):
+            """
+            Return a list of breakpoints.
+
+            Returns data in the following structure:
+            [
+                {
+                    "id":           1,
+                    "enabled":      True,
+                    "one_shot":     False,
+                    "hit_count":    5,
+                    "locations": [
+                        {
+                            "address":  0x100000cf0,
+                            "name":     'main'
+                        }
+                    ]
+                }
+            ]
+            """
+            breakpoints = []
+            t = self.host.GetTargetAtIndex(target_id)
+            s = lldb.SBStream()
+
+            for i in range(0, t.GetNumBreakpoints()):
+                b = t.GetBreakpointAtIndex(i)
+                locations = []
+
+                for j in range(0, b.GetNumLocations()):
+                    l = b.GetLocationAtIndex(j)
+                    s.Clear()
+                    l.GetAddress().GetDescription(s)
+                    desc = s.GetData()
+                    locations.append({
+                        'address':  l.GetLoadAddress(),
+                        'name':     desc
+                    })
+
+                breakpoints.append({
+                    'id':           b.id,
+                    'enabled':      b.enabled,
+                    'one_shot':     b.one_shot,
+                    'hit_count':    b.GetHitCount(),
+                    'locations':    locations
+                })
+
+            return breakpoints
+
+        def capabilities(self):
+            """
+            Return a list of the debugger's capabilities.
+
+            Thus far only the 'async' capability is supported. This indicates
+            that the debugger host can be queried from a background thread,
+            and that views can use non-blocking API requests without queueing
+            requests to be dispatched next time the debugger stops.
+            """
+            return ["async"]
+
+        def register_command_plugin(self, name, cls):
+            """
+            Register a command plugin with the LLDB adaptor.
+            """
+            # make sure we have a commands object
+            if not voltron.commands:
+                voltron.commands = namedtuple('VoltronCommands', [])
+
+            # method invocation creator
+            def create_invocation(obj):
+                def invoke(debugger, command, result, env_dict):
+                    obj.invoke(*command.split())
+                return invoke
+
+            # store the invocation in `voltron.commands` to pass to LLDB
+            setattr(voltron.commands, name, create_invocation(cls()))
+
+            # register the invocation as a command script handler thing
+            self.host.HandleCommand("command script add -f voltron.commands.{} {}".format(name, name))
+
+
+    class LLDBCommand(DebuggerCommand):
+        """
+        Debugger command class for LLDB
+        """
+        @staticmethod
+        def _invoke(debugger, command, result, dict):
+            voltron.command.invoke(debugger, command, result, dict)
+
+        def __init__(self):
+            super(LLDBCommand, self).__init__()
+
+            self.hook_idx = None
+            self.adaptor = voltron.debugger
+
+            # install the voltron command handler
+            self.adaptor.command("script import voltron")
+            self.adaptor.command('command script add -f voltron.command._invoke voltron')
+
+        def invoke(self, debugger, command, result, dict):
+            self.handle_command(command)
+
+        def register_hooks(self):
+            try:
+                output = self.adaptor.command("target stop-hook list")
+                if 'voltron' not in output:
+                    output = self.adaptor.command('target stop-hook add -o \'voltron stopped\'')
+                    try:
+                        # hahaha this sucks
+                        self.hook_idx = int(res.GetOutput().strip().split()[2][1:])
+                    except:
+                        pass
+                print("Registered stop-hook")
+            except:
+                print("No targets")
+
+        def unregister_hooks(self):
+            self.adaptor.command('target stop-hook delete {}'.format(self.hook_idx if self.hook_idx else ''))
+
 
     class LLDBAdaptorPlugin(DebuggerAdaptorPlugin):
         host = 'lldb'
         adaptor_class = LLDBAdaptor
+        command_class = LLDBCommand

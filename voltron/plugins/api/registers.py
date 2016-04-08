@@ -25,8 +25,6 @@ class APIRegistersRequest(APIRequest):
 
     `registers` is optional. If it is not included all registers will be
     returned.
-
-    This request will return immediately.
     """
     _fields = {'target_id': False, 'thread_id': False, 'registers': False}
 
@@ -44,11 +42,10 @@ class APIRegistersRequest(APIRequest):
             res = APITargetBusyErrorResponse()
         except NoSuchTargetException:
             res = APINoSuchTargetErrorResponse()
-        except Exception, e:
-            msg = "Exception getting registers from debugger: {}".format(e)
-            log.error(msg)
-            res = APIGenericErrorResponse()
-            res.error_message = msg
+        except Exception as e:
+            msg = "Exception getting registers from debugger: {}".format(repr(e))
+            log.exception(msg)
+            res = APIGenericErrorResponse(msg)
 
         return res
 

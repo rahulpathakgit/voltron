@@ -7,7 +7,11 @@ import pprint
 import re
 import signal
 import time
-from blessings import Terminal
+import argparse
+import traceback
+import subprocess
+from requests import ConnectionError
+from blessed import Terminal
 
 try:
     import pygments
@@ -18,6 +22,8 @@ except:
     have_pygments = False
 
 from collections import defaultdict
+
+from scruffy import Config
 
 from .core import *
 from .colour import *
@@ -35,6 +41,39 @@ SHORT_ADDR_FORMAT_32 = '{0:0=8X}'
 SHORT_ADDR_FORMAT_16 = '{0:0=4X}'
 
 
+# https://gist.github.com/sampsyo/471779
+class AliasedSubParsersAction(argparse._SubParsersAction):
+
+    class _AliasedPseudoAction(argparse.Action):
+        def __init__(self, name, aliases, help):
+            dest = name
+            if aliases:
+                dest += ' (%s)' % ','.join(aliases)
+            sup = super(AliasedSubParsersAction._AliasedPseudoAction, self)
+            sup.__init__(option_strings=[], dest=dest, help=help)
+
+    def add_parser(self, name, **kwargs):
+        if 'aliases' in kwargs:
+            aliases = kwargs['aliases']
+            del kwargs['aliases']
+        else:
+            aliases = []
+
+        parser = super(AliasedSubParsersAction, self).add_parser(name, **kwargs)
+
+        # Make the aliases work.
+        for alias in aliases:
+            self._name_parser_map[alias] = parser
+        # Make the help text reflect them, first removing old help entry.
+        if 'help' in kwargs:
+            help = kwargs.pop('help')
+            self._choices_actions.pop()
+            pseudo_action = self._AliasedPseudoAction(name, aliases, help)
+            self._choices_actions.append(pseudo_action)
+
+        return parser
+
+
 class AnsiString(object):
     def __init__(self, string):
         chunks = string.split('\033')
@@ -43,12 +82,15 @@ class AnsiString(object):
 
         if len(chunks) > 1:
             for chunk in chunks[1:]:
-                p = chunk.find('m')
-                if p > 0:
-                    chars.append('\033'+chunk[:p+1])
-                    chars.extend(list(chunk[p+1:]))
+                if chunk == '(B':
+                    chars.append('\033'+chunk)
                 else:
-                    chars.extend(list(chunk))
+                    p = chunk.find('m')
+                    if p > 0:
+                        chars.append('\033'+chunk[:p+1])
+                        chars.extend(list(chunk[p+1:]))
+                    else:
+                        chars.extend(list(chunk))
 
         # roll up ansi sequences
         ansi = []
@@ -82,7 +124,24 @@ class AnsiString(object):
 class VoltronView (object):
     """
     Parent class for all views.
+
+    Views may or may not support blocking mode. LLDB can be queried from a background thread, which means requests can
+    (if it makes sense) be fulfilled as soon as they're received. GDB cannot be queried from a background thread, so
+    requests have to be queued and dispatched by the main thread when the debugger stops. This means that GDB requires
+    blocking mode.
+
+    In blocking mode, the view's `render` method must make a single call to Client's send_request/send_request method,
+    with the request(s) flagged as blocking (block=True). If a view (or, more likely, a more complex client) has
+    multiple calls to send_request/send_requests, then it cannot support blocking mode and should be flagged as such
+    by including `supports_blocking = False` (see below, views are flagged as supporting blocking by default).
+
+    All of the included Voltron views support blocking mode, but this distinction has been made so that views can be
+    written for LLDB only without making compromises to support GDB.
     """
+    view_type = None
+    block = False
+    supports_blocking = True
+
     @classmethod
     def add_generic_arguments(cls, sp):
         sp.add_argument('--show-header', '-e', dest="header", action='store_true', help='show header', default=None)
@@ -91,12 +150,22 @@ class VoltronView (object):
         sp.add_argument('--hide-footer', '-F', dest="footer", action='store_false', help='hide footer')
         sp.add_argument('--name', '-n', action='store', help='named configuration to use', default=None)
 
+    @classmethod
+    def configure_subparser(cls, subparsers):
+        if hasattr(cls._plugin, 'aliases'):
+            sp = subparsers.add_parser(cls.view_type, aliases=cls._plugin.aliases, help='{} view'.format(cls.view_type))
+        else:
+            sp = subparsers.add_parser(cls.view_type, help='{} view'.format(cls.view_type))
+        VoltronView.add_generic_arguments(sp)
+        sp.set_defaults(func=cls)
+
     def __init__(self, args={}, loaded_config={}):
         log.debug('Loading view: ' + self.__class__.__name__)
-        self.client = Client()
+        self.client = Client(url=voltron.config.view.api_url)
         self.pm = None
         self.args = args
         self.loaded_config = loaded_config
+        self.server_version = None
 
         # Commonly set by render method for header and footer formatting
         self.title = ''
@@ -113,87 +182,109 @@ class VoltronView (object):
 
         # Override settings from command line args
         if self.args.header != None:
-            self.config['header']['show'] = self.args.header
+            self.config.header.show = self.args.header
         if self.args.footer != None:
-            self.config['footer']['show'] = self.args.footer
-
-        # Initialise window
-        self.init_window()
+            self.config.footer.show = self.args.footer
 
         # Setup a SIGWINCH handler so we do reasonable things on resize
-        # signal.signal(signal.SIGWINCH, lambda sig, stack: self.render())
+        signal.signal(signal.SIGWINCH, self.sigwinch_handler)
 
     def build_config(self):
         # Start with all_views config
-        self.config = self.loaded_config['view']['all_views']
+        self.config = self.loaded_config.view.all_views
 
         # Add view-specific config
-        self.config['type'] = self.view_type
+        self.config.type = self.view_type
         name = self.view_type + '_view'
-        if 'view' in self.loaded_config and name in self.loaded_config['view']:
-            merge(self.loaded_config['view'][name], self.config)
+        if 'view' in self.loaded_config and name in self.loaded_config.view:
+            self.config.update(self.loaded_config.view[name])
 
         # Add named config
         if self.args.name != None:
-            merge(self.loaded_config[self.args.name], self.config)
+            self.config.update(self.loaded_config[self.args.name])
 
         # Apply view-specific command-line args
         self.apply_cli_config()
 
     def apply_cli_config(self):
         if self.args.header != None:
-            self.config['header']['show'] = self.args.header
+            self.config.header.show = self.args.header
         if self.args.footer != None:
-            self.config['footer']['show'] = self.args.footer
+            self.config.footer.show = self.args.footer
 
     def setup(self):
         log.debug('Base view class setup')
 
+    def cleanup(self):
+        log.debug('Base view class cleanup')
+
     def run(self):
         res = None
         os.system('clear')
-        try:
-            while True:
-                # Connect to server
+
+        while True:
+            try:
+                # get the server version
+                if not self.server_version:
+                    self.server_version = self.client.perform_request('version')
+
+                    # if the server supports async mode, use it, as some views may only work in async mode
+                    if self.server_version.capabilities and 'async' in self.server_version.capabilities:
+                        self.block = False
+                    elif self.supports_blocking:
+                        self.block = True
+                    else:
+                        raise BlockingNotSupportedError("Debugger requires blocking mode")
+
+                # render the view. if this view is running in asynchronous mode, the view should return immediately.
+                self.render()
+
+                # if the view is not blocking (server supports async || view doesn't support sync), block until the
+                # debugger stops again
+                if not self.block:
+                    done = False
+                    while not done:
+                        res = self.client.perform_request('version', block=True)
+                        if res.is_success:
+                            done = True
+            except ConnectionError as e:
+                # what the hell, requests? a message is a message, not a fucking nested error object
                 try:
-                    self.client.connect()
-                    self.connected = True
-                except socket.error, e:
-                    self.connected = False
+                    msg = e.message.args[1].strerror
+                except:
+                    try:
+                        msg = e.message.args[0]
+                    except:
+                        msg = str(e)
+                traceback.print_exc()
+                # if we're not connected, render an error and try again in a second
+                self.do_render(error='Error: {}'.format(msg))
+                self.server_version = None
+                time.sleep(1)
 
-                if self.connected:
-                    # if this is the first iteration, or we got a valid response on the last iteration, render
-                    if res == None or hasattr(res, 'state') and res.state == 'stopped':
-                        self.render()
-
-                    # wait for the debugger to stop again
-                    wait_req = api_request('wait')
-                    res = self.client.send_request(wait_req)
-                else:
-                    # if we're not connected, try again in a second
-                    time.sleep(1)
-        except SocketDisconnected as e:
-            if self.should_reconnect():
-                log.debug("Restarting process: " + str(type(e)))
-                self.reexec()
-            else:
-                raise
-
-    def render(self, error=None):
+    def render(self):
         log.warning('Might wanna implement render() in this view eh')
+
+    def do_render(error=None):
+        pass
 
     def should_reconnect(self):
         try:
-            return self.loaded_config['view']['reconnect']
+            return self.loaded_config.view.reconnect
         except:
             return True
 
-    def reexec(self):
-        # Instead of trying to reset internal state, just exec ourselves again
-        os.execv(sys.argv[0], sys.argv)
+    def sigwinch_handler(self, sig, stack):
+        pass
 
 
 class TerminalView (VoltronView):
+    def __init__(self, *a, **kw):
+        # Initialise window
+        self.init_window()
+        self.trunc_top = False
+        super(TerminalView, self).__init__(*a, **kw)
+
     def init_window(self):
         # Hide cursor
         os.system('tput civis')
@@ -205,26 +296,51 @@ class TerminalView (VoltronView):
     def clear(self):
         os.system('clear')
 
-    def render(self, msg=None):
+    def render(self):
+        self.do_render()
+
+    def do_render(self, error=None):
+        # Clear the screen
         self.clear()
-        if self.config['header']['show']:
-            print(self.format_header())
-        print(self.body, end='')
-        if self.config['footer']['show']:
-            print('\n' + self.format_footer(), end='')
-        sys.stdout.flush()
+
+        # If we got an error, we'll use that as the body
+        if error:
+            self.body = self.colour(error, 'red')
+
+        # Refresh the formatted body
+        self.fmt_body = self.body
+
+        # Pad and truncate the body
+        self.pad_body()
+        self.truncate_body()
+
+        # Print the header, body and footer
+        try:
+            if self.config.header.show:
+                print(self.format_header_footer(self.config.header))
+            print(self.fmt_body, end='')
+            if self.config.footer.show:
+                print('\n' + self.format_header_footer(self.config.footer), end='')
+            sys.stdout.flush()
+        except IOError as e:
+            # if we get an EINTR while printing, just do it again
+            if e.errno == socket.EINTR:
+                self.do_render()
+
+    def sigwinch_handler(self, sig, stack):
+        self.do_render()
 
     def window_size(self):
-        height, width = os.popen('stty size').read().split()
+        height, width = subprocess.check_output(['stty', 'size']).split()
         height = int(height)
         width = int(width)
         return (height, width)
 
     def body_height(self):
         height, width = self.window_size()
-        if self.config['header']['show']:
+        if self.config.header.show:
             height -= 1
-        if self.config['footer']['show']:
+        if self.config.footer.show:
             height -= 1
         return height
 
@@ -240,77 +356,53 @@ class TerminalView (VoltronView):
         s += fmt_esc('reset')
         return s
 
-    def format_header(self):
+    def format_header_footer(self, c):
         height, width = self.window_size()
 
         # Get values for labels
-        l = getattr(self, self.config['header']['label_left']['name']) if self.config['header']['label_left']['name'] != None else ''
-        r = getattr(self, self.config['header']['label_right']['name']) if self.config['header']['label_right']['name'] != None else ''
-        p = self.config['header']['pad']
+        l = getattr(self, c.label_left.name) if c.label_left.name != None else ''
+        r = getattr(self, c.label_right.name) if c.label_right.name != None else ''
+        p = c.pad
         llen = len(l)
         rlen = len(r)
 
         # Add colour
-        l = self.colour(l, self.config['header']['label_left']['colour'], self.config['header']['label_left']['bg_colour'], self.config['header']['label_left']['attrs'])
-        r = self.colour(r, self.config['header']['label_right']['colour'], self.config['header']['label_right']['bg_colour'], self.config['header']['label_right']['attrs'])
-        p = self.colour(p, self.config['header']['colour'], self.config['header']['bg_colour'], self.config['header']['attrs'])
+        l = self.colour(l, c.label_left.colour, c.label_left.bg_colour, c.label_left.attrs)
+        r = self.colour(r, c.label_right.colour, c.label_right.bg_colour, c.label_right.attrs)
+        p = self.colour(p, c.colour, c.bg_colour, c.attrs)
 
-        # Build header
-        header = l + (width - llen - rlen)*p + r
+        # Build
+        data = l + (width - llen - rlen)*p + r
 
-        return header
-
-    def format_footer(self):
-        height, width = self.window_size()
-
-        # Get values for labels
-        l = getattr(self, self.config['footer']['label_left']['name']) if self.config['footer']['label_left']['name'] != None else ''
-        r = getattr(self, self.config['footer']['label_right']['name']) if self.config['footer']['label_right']['name'] != None else ''
-        p = self.config['footer']['pad']
-        llen = len(l)
-        rlen = len(r)
-
-        # Add colour
-        l = self.colour(l, self.config['footer']['label_left']['colour'], self.config['footer']['label_left']['bg_colour'], self.config['footer']['label_left']['attrs'])
-        r = self.colour(r, self.config['footer']['label_right']['colour'], self.config['footer']['label_right']['bg_colour'], self.config['footer']['label_right']['attrs'])
-        p = self.colour(p, self.config['footer']['colour'], self.config['footer']['bg_colour'], self.config['footer']['attrs'])
-
-        # Build header and footer
-        footer = l + (width - llen - rlen)*p + r
-
-        return footer
+        return data
 
     def pad_body(self):
         height, width = self.window_size()
-
-        # Split body into lines
-        lines = self.body.split('\n')
-
-        # Subtract lines (including wrapped lines)
-        pad = self.body_height()
-        for line in lines:
-            line = ''.join(re.split('\033\[\d+m', line))
-            (n, rem) = divmod(len(line), width)
-            if rem > 0: n += 1
-            pad -= n
-
-        # If we have too much data for the view, too bad
+        lines = self.fmt_body.split('\n')
+        pad = self.body_height() - len(lines)
         if pad < 0:
             pad = 0
-
-        self.body += int(pad)*'\n'
+        self.fmt_body += int(pad)*'\n'
 
     def truncate_body(self):
         height, width = self.window_size()
 
+        # truncate lines horizontally
         lines = []
-        for line in self.body.split('\n'):
+        for line in self.fmt_body.split('\n'):
             s = AnsiString(line)
             if len(s) > width:
                 line = s[:width-1] + self.colour('>', 'red')
             lines.append(line)
 
-        self.body = '\n'.join(lines)
+        # truncate body vertically
+        if len(lines) > self.body_height():
+            if self.trunc_top:
+                lines = lines[len(lines) - self.body_height():]
+            else:
+                lines = lines[:self.body_height()]
+
+        self.fmt_body = '\n'.join(lines)
 
 
 def merge(d1, d2):

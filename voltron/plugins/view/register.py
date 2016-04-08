@@ -1,10 +1,11 @@
+from numbers import Number
+from voltron.core import STRTYPES
 from voltron.view import *
 from voltron.plugin import *
 from voltron.api import *
 
-# Class to actually render the view
+
 class RegisterView (TerminalView):
-    view_type = 'register'
     FORMAT_INFO = {
         'x86_64': [
             {
@@ -21,14 +22,14 @@ class RegisterView (TerminalView):
             {
                 'regs':             ['rflags'],
                 'value_format':     '{}',
-                'value_func':       'self.format_flags',
+                'value_func':       'format_flags',
                 'value_colour_en':  False,
                 'category':         'general',
             },
             {
                 'regs':             ['rflags'],
                 'value_format':     '{}',
-                'value_func':       'self.format_jump',
+                'value_func':       'format_jump',
                 'value_colour_en':  False,
                 'category':         'general',
                 'format_name':      'jump'
@@ -37,13 +38,13 @@ class RegisterView (TerminalView):
                 'regs':             ['xmm0','xmm1','xmm2','xmm3','xmm4','xmm5','xmm6','xmm7','xmm8',
                                      'xmm9','xmm10','xmm11','xmm12','xmm13','xmm14','xmm15'],
                 'value_format':     SHORT_ADDR_FORMAT_128,
-                'value_func':       'self.format_xmm',
+                'value_func':       'format_xmm',
                 'category':         'sse',
             },
             {
                 'regs':             ['st0','st1','st2','st3','st4','st5','st6','st7'],
                 'value_format':     '{0:0=20X}',
-                'value_func':       'self.format_fpu',
+                'value_func':       'format_fpu',
                 'category':         'fpu',
             },
         ],
@@ -62,14 +63,14 @@ class RegisterView (TerminalView):
             {
                 'regs':             ['eflags'],
                 'value_format':     '{}',
-                'value_func':       'self.format_flags',
+                'value_func':       'format_flags',
                 'value_colour_en':  False,
                 'category':         'general',
             },
             {
                 'regs':             ['eflags'],
                 'value_format':     '{}',
-                'value_func':       'self.format_jump',
+                'value_func':       'format_jump',
                 'value_colour_en':  False,
                 'category':         'general',
                 'format_name':      'jump'
@@ -77,13 +78,13 @@ class RegisterView (TerminalView):
             {
                 'regs':             ['xmm0','xmm1','xmm2','xmm3','xmm4','xmm5','xmm6','xmm7'],
                 'value_format':     SHORT_ADDR_FORMAT_128,
-                'value_func':       'self.format_xmm',
+                'value_func':       'format_xmm',
                 'category':         'sse',
             },
             {
                 'regs':             ['st0','st1','st2','st3','st4','st5','st6','st7'],
                 'value_format':     '{0:0=20X}',
-                'value_func':       'self.format_fpu',
+                'value_func':       'format_fpu',
                 'category':         'fpu',
             },
         ],
@@ -105,6 +106,18 @@ class RegisterView (TerminalView):
                 'value_format':     SHORT_ADDR_FORMAT_64,
                 'category':         'general',
             },
+        ],
+        'powerpc': [
+            {
+                'regs':             ['pc','msr','cr','lr', 'ctr',
+                                     'r0','r1','r2','r3','r4','r5','r6', 'r7',
+                                     'r8','r9','r10','r11','r12','r13','r14', 'r15',
+                                     'r16','r17','r18','r19','r20','r21','r22', 'r23',
+                                     'r24','r25','r26','r27','r28','r29','r30', 'r31'],
+                'label_format':     '{0:>3s}:',
+                'value_format':     SHORT_ADDR_FORMAT_32,
+                'category':         'general',
+            }
         ],
     }
     TEMPLATES = {
@@ -203,6 +216,31 @@ class RegisterView (TerminalView):
                 ),
             }
         },
+        'powerpc': {
+            'horizontal': {
+                'general': (
+                    "{pcl} {pc} {crl} {cr} {lrl} {lr} {msrl} {msr} {ctrl} {ctr}\n"
+                    "{r0l} {r0} {r1l} {r1} {r2l} {r2} {r3l} {r3}\n"
+                    "{r4l} {r4} {r5l} {r5} {r6l} {r6} {r7l} {r7}\n"
+                    "{r8l} {r8} {r9l} {r9} {r10l} {r10} {r11l} {r11}\n"
+                    "{r12l} {r12} {r13l} {r13} {r14l} {r14} {r15l} {r15}\n"
+                    "{r16l} {r16} {r17l} {r17} {r18l} {r18} {r19l} {r19}\n"
+                    "{r20l} {r20} {r21l} {r21} {r22l} {r22} {r23l} {r23}\n"
+                    "{r24l} {r24} {r25l} {r25} {r26l} {r26} {r27l} {r27}\n"
+                    "{r28l} {r28} {r29l} {r29} {r30l} {r30} {r31l} {r31}"
+                ),
+            },
+            'vertical': {
+                'general': (
+                    "{pcl} {pc}\n{crl} {cr}\n{lrl} {lr}\n"
+                    "{msrl} {msr}\n{ctrl} {ctr}\n"
+                    "{r0l} {r0}\n{r1l} {r1}\n{r2l} {r2}\n{r3l} {r3}\n{r4l} {r4}\n{r5l} {r5}\n{r6l} {r6}\n{r7l} {r7}\n"
+                    "{r8l} {r8}\n{r9l} {r9}\n{r10l} {r10}\n{r11l} {r11}\n{r12l} {r12}\n{r13l} {r13}\n{r14l} {r14}\n{r15l} {r15}\n"
+                    "{r16l} {r16}\n{r17l} {r17}\n{r18l} {r18}\n{r19l} {r19}\n{r20l} {r20}\n{r21l} {r21}\n{r22l} {r22}\n{r23l} {r23}\n"
+                    "{r24l} {r24}\n{r25l} {r25}\n{r26l} {r26}\n{r27l} {r27}\n{r28l} {r28}\n{r29l} {r29}\n{r30l} {r30}\n{r31l} {r31}"
+                ),
+            }
+        },
         'arm64': {
             'horizontal': {
                 'general': (
@@ -234,7 +272,7 @@ class RegisterView (TerminalView):
 
     @classmethod
     def configure_subparser(cls, subparsers):
-        sp = subparsers.add_parser('reg', help='register view')
+        sp = subparsers.add_parser('register', help='register values', aliases=('r', 'reg'))
         VoltronView.add_generic_arguments(sp)
         sp.set_defaults(func=RegisterView)
         g = sp.add_mutually_exclusive_group()
@@ -247,70 +285,80 @@ class RegisterView (TerminalView):
         sp.add_argument('--fpu', '-p',          dest="sections",    action='append_const',  const="fpu",        help='show fpu registers')
         sp.add_argument('--no-fpu', '-P',       dest="sections",    action='append_const',  const="no_fpu",     help='show fpu registers')
 
+    def __init__(self, *args, **kwargs):
+        super(RegisterView, self).__init__(*args, **kwargs)
+        self.str_upper = str.upper
+
     def apply_cli_config(self):
         super(RegisterView, self).apply_cli_config()
         if self.args.orientation != None:
-            self.config['orientation'] = self.args.orientation
+            self.config.orientation = self.args.orientation
         if self.args.sections != None:
-            a = filter(lambda x: 'no_'+x not in self.args.sections and not x.startswith('no_'), self.config['sections'] + self.args.sections)
-            self.config['sections'] = []
+            a = filter(lambda x: 'no_'+x not in self.args.sections and not x.startswith('no_'), list(self.config.sections) + self.args.sections)
+            config_sections = []
             for sec in a:
-                if sec not in self.config['sections']:
-                    self.config['sections'].append(sec)
+                if sec not in config_sections:
+                    config_sections.append(sec)
+            self.config.sections = config_sections
 
-    def render(self, error=None):
+    def render(self):
+        error = None
+
         # get target info (ie. arch)
-        res = self.client.perform_request('targets')
-        if res.is_error:
-            error = "Failed getting targets: {}".format(res.message)
-        else:
-            if len(res.targets) == 0:
-                error = "No targets in debugger"
-            else:
-                arch = res.targets[0]['arch']
-                self.curr_arch = arch
+        t_res, d_res, r_res = self.client.send_requests(api_request('targets', block=self.block),
+                                                        api_request('disassemble', count=1, block=self.block),
+                                                        api_request('registers', block=self.block))
 
+        # don't render if it timed out, probably haven't stepped the debugger again
+        if t_res.timed_out:
+            return
+
+        if t_res and t_res.is_error or t_res is None or t_res and len(t_res.targets) == 0:
+            error = "No such target"
+        else:
+            arch = t_res.targets[0]['arch']
+            self.curr_arch = arch
+
+            # ensure the architecture is supported
+            if arch not in self.FORMAT_INFO:
+                error = "Architecture '{}' not supported".format(arch)
+            else:
                 # get next instruction
-                res = self.client.perform_request('disassemble', count=1)
                 try:
-                    self.curr_inst = res.disassembly.strip().split('\n')[-1].split(':')[1].strip()
+                    self.curr_inst = d_res.disassembly.strip().split('\n')[-1].split(':')[1].strip()
                 except:
                     self.curr_inst = None
 
                 # get registers for target
-                res = self.client.perform_request('registers')
-                if res.is_error:
-                    error = "Failed getting registers: {}".format(res.message)
+                if r_res.is_error:
+                    error = r_res.message
 
         # if everything is ok, render the view
         if not error:
-            # Store current response
-            self.curr_res = res
-
             # Build template
-            template = '\n'.join(map(lambda x: self.TEMPLATES[arch][self.config['orientation']][x], self.config['sections']))
+            template = '\n'.join(map(lambda x: self.TEMPLATES[arch][self.config.orientation][x], self.config.sections))
 
             # Process formatting settings
             data = defaultdict(lambda: 'n/a')
-            data.update(res.registers)
+            data.update(r_res.registers)
             formats = self.FORMAT_INFO[arch]
             formatted = {}
             for fmt in formats:
                 # Apply defaults where they're missing
-                fmt = dict(list(self.config['format'].items()) + list(fmt.items()))
+                fmt = dict(list(self.config.format.items()) + list(fmt.items()))
 
                 # Format the data for each register
                 for reg in fmt['regs']:
                     # Format the label
                     label = fmt['label_format'].format(reg)
                     if fmt['label_func'] != None:
-                        formatted[reg+'l'] = eval(fmt['label_func'])(str(label))
+                        formatted[reg+'l'] = getattr(self, fmt['label_func'])(str(label))
                     if fmt['label_colour_en']:
                         formatted[reg+'l'] =  self.colour(formatted[reg+'l'], fmt['label_colour'])
 
                     # Format the value
                     val = data[reg]
-                    if type(val) == str:
+                    if isinstance(val, STRTYPES):
                         temp = fmt['value_format'].format(0)
                         if len(val) < len(temp):
                             val += (len(temp) - len(val))*' '
@@ -320,11 +368,11 @@ class RegisterView (TerminalView):
                         if self.last_regs == None or self.last_regs != None and val != self.last_regs[reg]:
                             colour = fmt['value_colour_mod']
                         formatted_reg = val
-                        if fmt['value_format'] != None and type(formatted_reg) not in [str, unicode]:
+                        if fmt['value_format'] != None and isinstance(formatted_reg, Number):
                             formatted_reg = fmt['value_format'].format(formatted_reg)
                         if fmt['value_func'] != None:
-                            if type(fmt['value_func']) == str:
-                                formatted_reg = eval(fmt['value_func'])(formatted_reg)
+                            if isinstance(fmt['value_func'], STRTYPES):
+                                formatted_reg = getattr(self, fmt['value_func'])(formatted_reg)
                             else:
                                 formatted_reg = fmt['value_func'](formatted_reg)
                         if fmt['value_colour_en']:
@@ -346,12 +394,9 @@ class RegisterView (TerminalView):
 
         # Prepare headers and footers
         height, width = self.window_size()
-        self.title = '[regs:{}]'.format('|'.join(self.config['sections']))
+        self.title = '[regs:{}]'.format('|'.join(self.config.sections))
         if len(self.title) > width:
             self.title = '[regs]'
-
-        # Pad the body
-        self.pad_body()
 
         # Call parent's render method
         super(RegisterView, self).render()
@@ -364,7 +409,7 @@ class RegisterView (TerminalView):
             reg = 'rflags'
         elif self.curr_arch == 'x86':
             reg = 'eflags'
-        fmt = dict(list(self.config['format'].items()) + list(list(filter(lambda x: reg in x['regs'], self.FORMAT_INFO[self.curr_arch]))[0].items()))
+        fmt = dict(list(self.config.format.items()) + list(list(filter(lambda x: reg in x['regs'], self.FORMAT_INFO[self.curr_arch]))[0].items()))
 
         # Handle each flag bit
         val = int(val, 10)
@@ -395,100 +440,101 @@ class RegisterView (TerminalView):
             values[flag] = (val & (1 << self.FLAG_BITS[flag]) > 0)
 
         # If this is a jump instruction, see if it will be taken
-        inst = self.curr_inst.split()[0]
         j = None
-        if inst in ['ja', 'jnbe']:
-            if not values['c'] and not values['z']:
-                j = (True, '!c && !z')
-            else:
-                j = (False, 'c || z')
-        elif inst in ['jae', 'jnb', 'jnc']:
-            if not values['c']:
-                j = (True, '!c')
-            else:
-                j = (False, 'c')
-        elif inst in ['jb', 'jc', 'jnae']:
-            if values['c']:
-                j = (True, 'c')
-            else:
-                j = (False, '!c')
-        elif inst in ['jbe', 'jna']:
-            if values['c'] or values['z']:
-                j = (True, 'c || z')
-            else:
-                j = (False, '!c && !z')
-        elif inst in ['jcxz', 'jecxz', 'jrcxz']:
-            if self.get_arch() == 'x64':
-                cx = regs['rcx']
-            elif self.get_arch() == 'x86':
-                cx = regs['ecx']
-            if cx == 0:
-                j = (True, cx+'==0')
-            else:
-                j = (False, cx+'!=0')
-        elif inst in ['je', 'jz']:
-            if values['z']:
-                j = (True, 'z')
-            else:
-                j = (False, '!z')
-        elif inst in ['jnle', 'jg']:
-            if not values['z'] and values['s'] == values['o']:
-                j = (True, '!z && s==o')
-            else:
-                j = (False, 'z || s!=o')
-        elif inst in ['jge', 'jnl']:
-            if values['s'] == values['o']:
-                j = (True, 's==o')
-            else:
-                j = (False, 's!=o')
-        elif inst in ['jl', 'jnge']:
-            if values['s'] == values['o']:
-                j = (False, 's==o')
-            else:
-                j = (True, 's!=o')
-        elif inst in ['jle', 'jng']:
-            if values['z'] or values['s'] == values['o']:
-                j = (True, 'z || s==o')
-            else:
-                j = (False, '!z && s!=o')
-        elif inst in ['jne', 'jnz']:
-            if not values['z']:
-                j = (True, '!z')
-            else:
-                j = (False, 'z')
-        elif inst in ['jno']:
-            if not values['o']:
-                j = (True, '!o')
-            else:
-                j = (False, 'o')
-        elif inst in ['jnp', 'jpo']:
-            if not values['p']:
-                j = (True, '!p')
-            else:
-                j = (False, 'p')
-        elif inst in ['jns']:
-            if not values['s']:
-                j = (True, '!s')
-            else:
-                j = (False, 's')
-        elif inst in ['jo']:
-            if values['o']:
-                j = (True, 'o')
-            else:
-                j = (False, '!o')
-        elif inst in ['jp', 'jpe']:
-            if values['p']:
-                j = (True, 'p')
-            else:
-                j = (False, '!p')
-        elif inst in ['js']:
-            if values['s']:
-                j = (True, 's')
-            else:
-                j = (False, '!s')
+        if self.curr_inst:
+            inst = self.curr_inst.split()[0]
+            if inst in ['ja', 'jnbe']:
+                if not values['c'] and not values['z']:
+                    j = (True, '!c && !z')
+                else:
+                    j = (False, 'c || z')
+            elif inst in ['jae', 'jnb', 'jnc']:
+                if not values['c']:
+                    j = (True, '!c')
+                else:
+                    j = (False, 'c')
+            elif inst in ['jb', 'jc', 'jnae']:
+                if values['c']:
+                    j = (True, 'c')
+                else:
+                    j = (False, '!c')
+            elif inst in ['jbe', 'jna']:
+                if values['c'] or values['z']:
+                    j = (True, 'c || z')
+                else:
+                    j = (False, '!c && !z')
+            elif inst in ['jcxz', 'jecxz', 'jrcxz']:
+                if self.get_arch() == 'x64':
+                    cx = regs['rcx']
+                elif self.get_arch() == 'x86':
+                    cx = regs['ecx']
+                if cx == 0:
+                    j = (True, cx+'==0')
+                else:
+                    j = (False, cx+'!=0')
+            elif inst in ['je', 'jz']:
+                if values['z']:
+                    j = (True, 'z')
+                else:
+                    j = (False, '!z')
+            elif inst in ['jnle', 'jg']:
+                if not values['z'] and values['s'] == values['o']:
+                    j = (True, '!z && s==o')
+                else:
+                    j = (False, 'z || s!=o')
+            elif inst in ['jge', 'jnl']:
+                if values['s'] == values['o']:
+                    j = (True, 's==o')
+                else:
+                    j = (False, 's!=o')
+            elif inst in ['jl', 'jnge']:
+                if values['s'] == values['o']:
+                    j = (False, 's==o')
+                else:
+                    j = (True, 's!=o')
+            elif inst in ['jle', 'jng']:
+                if values['z'] or values['s'] == values['o']:
+                    j = (True, 'z || s==o')
+                else:
+                    j = (False, '!z && s!=o')
+            elif inst in ['jne', 'jnz']:
+                if not values['z']:
+                    j = (True, '!z')
+                else:
+                    j = (False, 'z')
+            elif inst in ['jno']:
+                if not values['o']:
+                    j = (True, '!o')
+                else:
+                    j = (False, 'o')
+            elif inst in ['jnp', 'jpo']:
+                if not values['p']:
+                    j = (True, '!p')
+                else:
+                    j = (False, 'p')
+            elif inst in ['jns']:
+                if not values['s']:
+                    j = (True, '!s')
+                else:
+                    j = (False, 's')
+            elif inst in ['jo']:
+                if values['o']:
+                    j = (True, 'o')
+                else:
+                    j = (False, '!o')
+            elif inst in ['jp', 'jpe']:
+                if values['p']:
+                    j = (True, 'p')
+                else:
+                    j = (False, '!p')
+            elif inst in ['js']:
+                if values['s']:
+                    j = (True, 's')
+                else:
+                    j = (False, '!s')
 
         # Construct message
-        if j != None:
+        if j is not None:
             taken, reason = j
             if taken:
                 jump = 'Jump ({})'.format(reason)
@@ -498,30 +544,28 @@ class RegisterView (TerminalView):
             jump = ''
 
         # Pad out
-        height, width = self.window_size()
-        t = '{:^%d}' % (width - 2)
-        jump = t.format(jump)
+        jump = '{:^19}'.format(jump)
 
         # Colour
-        if j != None:
-            jump = self.colour(jump, self.config['format']['value_colour_mod'])
+        if j is not None:
+            jump = self.colour(jump, self.config.format.value_colour_mod)
         else:
-            jump = self.colour(jump, self.config['format']['value_colour'])
+            jump = self.colour(jump, self.config.format.value_colour)
 
         return '[' + jump + ']'
 
     def format_xmm(self, val):
-        if self.config['orientation'] == 'vertical':
+        if self.config.orientation == 'vertical':
             height, width = self.window_size()
             if width < len(SHORT_ADDR_FORMAT_128.format(0)) + self.XMM_INDENT:
                 return val[:16] + '\n' + ' '*self.XMM_INDENT + val[16:]
             else:
-                return val[:16] +  ':' + val[16:]
+                return val[:16] + ':' + val[16:]
         else:
             return val
 
     def format_fpu(self, val):
-        if self.config['orientation'] == 'vertical':
+        if self.config.orientation == 'vertical':
             return val
         else:
             return val

@@ -1,5 +1,6 @@
 import logging
 import struct
+import six
 
 from voltron.view import *
 from voltron.plugin import *
@@ -8,12 +9,13 @@ from voltron.api import *
 log = logging.getLogger("view")
 
 class MemoryView (TerminalView):
-    view_type = 'memory'
     printable_filter = ''.join([(len(repr(chr(x))) == 3) and chr(x) or '.' for x in range(256)])
+
+    async = True
 
     @classmethod
     def configure_subparser(cls, subparsers):
-        sp = subparsers.add_parser('memory', help='memory view')
+        sp = subparsers.add_parser('memory', help='display a chunk of memory', aliases=('m', 'mem'))
         VoltronView.add_generic_arguments(sp)
         group = sp.add_mutually_exclusive_group(required=False)
         group.add_argument('--deref', '-d', action='store_true', help=('display the data in a column one CPU word wide '
@@ -29,85 +31,70 @@ class MemoryView (TerminalView):
         group.add_argument('--register', '-r', action='store', help='register containing the address from which to start reading memory', default=None)
         sp.set_defaults(func=MemoryView)
 
-    def render(self, error=None):
+    def render(self):
         height, width = self.window_size()
-
-        # get info about target
         target = None
-        res = self.client.perform_request('targets')
-        if res.is_success and len(res.targets) > 0:
-            target = res.targets[0]
+        self.trunc_top = self.args.reverse
 
-        if target and self.args.deref:
-            self.args.bytes = target['addr_size']
+        # check args
+        if self.args.register:
+            args = {'register': self.args.register}
+        elif self.args.command:
+            args = {'command': self.args.command}
+        else:
+            args = {'address': self.args.address}
+        if self.args.deref:
+            args['words'] = height
+        else:
+            args['length'] = height*self.args.bytes
+
+        # get memory and target info
+        m_res, t_res = self.client.send_requests(
+            api_request('memory', block=self.block, deref=True, **args),
+            api_request('targets', block=self.block))
+
+        # don't render if it timed out, probably haven't stepped the debugger again
+        if t_res.timed_out:
+            return
+
+        if t_res and t_res.is_success and len(t_res.targets) > 0:
+            target = t_res.targets[0]
+
+            if self.args.deref:
+                self.args.bytes = target['addr_size']
+
+            if m_res and m_res.is_success:
+                lines = []
+                for c in range(0, m_res.bytes, self.args.bytes):
+                    chunk = m_res.memory[c:c+self.args.bytes]
+                    addr_str = self.colour(self.format_address(m_res.address + c, size=target['addr_size'], pad=False),
+                                            self.config.format.addr_colour)
+                    if self.args.deref:
+                        fmt = ('<' if target['byte_order'] == 'little' else '>') + \
+                                {2: 'H', 4: 'L', 8: 'Q'}[target['addr_size']]
+                        info_str = ''
+                        if len(chunk) == target['addr_size']:
+                            pointer = list(struct.unpack(fmt, chunk))[0]
+                            memory_str = ' '.join(["%02X" % x for x in six.iterbytes(chunk)])
+                            info_str = self.format_deref(m_res.deref.pop(0))
+                    else:
+                        memory_str = ' '.join(["%02X" % x for x in six.iterbytes(chunk)])
+                        info_str = ''
+                    ascii_str = ''.join(["%s" % ((x <= 127 and self.printable_filter[x]) or '.') for x in six.iterbytes(chunk)])
+                    divider = self.colour('|', self.config.format.divider_colour)
+                    lines.append('{}: {} {} {} {} {}'.format(addr_str, memory_str, divider, ascii_str, divider, info_str))
+
+                self.body = '\n'.join(reversed(lines)).strip() if self.args.reverse else '\n'.join(lines)
+                self.info = '[0x{0:0=4x}:'.format(len(m_res.memory)) + self.config.format.addr_format.format(m_res.address) + ']'
+            else:
+                log.error("Error reading memory: {}".format(m_res.message))
+                self.body = self.colour(m_res.message, 'red')
+                self.info = ''
+        else:
+            self.body = self.colour("Failed to get targets", 'red')
 
         if not self.title:
             self.title = "[memory]"
-
-        if error != None:
-            self.body = self.colour(error, 'red')
-        else:
-            # find the address we're reading memory from
-            addr = None
-            if self.args.command:
-                res = self.client.perform_request('command', command=self.args.command)
-                if res.is_success:
-                    for item in reversed(res.output.split()):
-                        log.debug("checking item: {}".format(item))
-                        try:
-                            addr = int(item)
-                            break
-                        except:
-                            try:
-                                addr = int(item, 16)
-                                break
-                            except:
-                                pass
-            elif self.args.address:
-                addr = int(self.args.address, 16)
-            elif self.args.register:
-                res = self.client.perform_request('registers', registers=[self.args.register])
-                if res.is_success:
-                    addr = res.registers.values()[0]
-
-            # read memory
-            if addr != None:
-                res = self.client.perform_request('memory', address=addr, length=self.body_height()*self.args.bytes)
-                if res.is_success:
-
-                    lines = []
-                    for c in range(0, res.bytes, self.args.bytes):
-                        chunk = res.memory[c:c+self.args.bytes]
-                        addr_str = self.colour(self.format_address(addr + c, size=target['addr_size'], pad=False), self.config['format']['addr_colour'])
-                        if self.args.deref:
-                            fmt = ('<' if target['byte_order'] == 'little' else '>') + \
-                                    {2: 'H', 4: 'L', 8: 'Q'}[target['addr_size']]
-                            pointer = list(struct.unpack(fmt, chunk))[0]
-                            memory_str = ' '.join(["%02X" % ord(x) for x in chunk])
-                            deref_res = self.client.perform_request('dereference', pointer=pointer)
-                            if deref_res.is_success:
-                                info_str = self.format_deref(deref_res.output)
-                            else:
-                                info_str = ''
-                        else:
-                            memory_str = ' '.join(["%02X" % ord(x) for x in chunk])
-                            info_str = ''
-                        ascii_str = ''.join(["%s" % ((ord(x) <= 127 and self.printable_filter[ord(x)]) or '.') for x in chunk])
-                        divider = self.colour('|', self.config['format']['divider_colour'])
-                        lines.append('{}: {} {} {} {} {}'.format(addr_str, memory_str, divider, ascii_str, divider, info_str))
-
-                    self.body = '\n'.join(reversed(lines)).strip() if self.args.reverse else '\n'.join(lines)
-                    self.info = '[0x{0:0=4x}:'.format(len(res.memory)) + self.config['format']['addr_format'].format(addr) + ']'
-                else:
-                    log.error("Error reading memory: {}".format(res.message))
-                    self.body = self.colour(res.message, 'red')
-                    self.info = '[0x{0:0=4x}:'.format(0) + self.config['format']['addr_format'].format(addr) + ']'
-            else:
-                self.body = ""
-                self.info = "[no address]"
-
-        self.truncate_body()
-        self.pad_body()
 
         super(MemoryView, self).render()
 
@@ -125,12 +112,12 @@ class MemoryView (TerminalView):
                 fmtd.append(self.format_address(item, size=size, pad=False))
             elif t == "string":
                 item = item.replace('\n', '\\n')
-                fmtd.append(self.colour('"' + item + '"', self.config['format']['string_colour']))
+                fmtd.append(self.colour('"' + item + '"', self.config.format.string_colour))
             elif t == "symbol":
-                fmtd.append(self.colour('`' + item + '`', self.config['format']['symbol_colour']))
+                fmtd.append(self.colour('`' + item + '`', self.config.format.symbol_colour))
             elif t == "circular":
-                fmtd.append(self.colour('(circular)', self.config['format']['divider_colour']))
-        return self.colour(' => ', self.config['format']['divider_colour']).join(fmtd)
+                fmtd.append(self.colour('(circular)', self.config.format.divider_colour))
+        return self.colour(' => ', self.config.format.divider_colour).join(fmtd)
 
 
 class MemoryViewPlugin(ViewPlugin):
@@ -140,15 +127,13 @@ class MemoryViewPlugin(ViewPlugin):
 
 
 class StackView(MemoryView):
-    view_type = 'stack'
-
     @classmethod
     def configure_subparser(cls, subparsers):
-        sp = subparsers.add_parser('stack', help='stack view')
+        sp = subparsers.add_parser('stack', help='display a chunk of stack memory', aliases=('s', 'st'))
         VoltronView.add_generic_arguments(sp)
         sp.set_defaults(func=StackView)
 
-    def render(self, error=None):
+    def render(self):
         self.args.reverse = True
         self.args.deref = True
         self.args.register = 'sp'
@@ -158,7 +143,7 @@ class StackView(MemoryView):
 
         self.title = '[stack]'
 
-        super(StackView, self).render(error=error)
+        super(StackView, self).render()
 
 
 class StackViewPlugin(ViewPlugin):
